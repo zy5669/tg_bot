@@ -63,6 +63,17 @@ TELEGRAM_API_CONCURRENT_UPLOADS: int = int(
     os.getenv("TELEGRAM_API_CONCURRENT_UPLOADS", "2")
 )
 
+# ==================== HTTP 提交服务 ====================
+
+# 给油猴脚本/其他客户端提交 Twitter 链接的内嵌 HTTP 服务。
+HTTP_SUBMIT_ENABLED: bool = os.getenv("HTTP_SUBMIT_ENABLED", "false").lower() == "true"
+HTTP_SUBMIT_HOST: str = os.getenv("HTTP_SUBMIT_HOST", "127.0.0.1")
+HTTP_SUBMIT_PORT: int = int(os.getenv("HTTP_SUBMIT_PORT", "8787"))
+HTTP_SUBMIT_SECRET: str | None = os.getenv("HTTP_SUBMIT_SECRET", "").strip() or None
+
+# CORS 允许来源。油猴脚本跨域请求通常不依赖浏览器 CORS，但保留给普通网页调用。
+HTTP_SUBMIT_CORS_ORIGIN: str = os.getenv("HTTP_SUBMIT_CORS_ORIGIN", "*")
+
 # 调试模式：显示更多日志
 DEBUG_MODE: bool = os.getenv("DEBUG", "false").lower() == "true"
 

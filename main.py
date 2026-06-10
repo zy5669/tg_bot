@@ -15,9 +15,26 @@ from bot.telegram_api import create_telegram_api_uploader
 
 async def post_init(app: Application) -> None:
     app.bot_data["telegram_api_uploader"] = await create_telegram_api_uploader()
+    if config.HTTP_SUBMIT_ENABLED:
+        try:
+            from bot.http_submit_server import HTTPSubmitServer
+        except ImportError:
+            logging.getLogger(__name__).error(
+                "HTTP 提交服务启用失败: 未安装 aiohttp，请运行 pip install -r requirements.txt"
+            )
+        else:
+            http_submit_server = HTTPSubmitServer(app)
+            await http_submit_server.start()
+            app.bot_data["http_submit_server"] = http_submit_server
+    else:
+        logging.getLogger(__name__).info("HTTP 提交服务未启用")
 
 
 async def post_shutdown(app: Application) -> None:
+    http_submit_server = app.bot_data.get("http_submit_server")
+    if http_submit_server:
+        await http_submit_server.stop()
+
     uploader = app.bot_data.get("telegram_api_uploader")
     if uploader:
         await uploader.stop()
