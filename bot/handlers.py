@@ -13,6 +13,7 @@ Telegram Bot 消息处理器
 import asyncio
 import logging
 import os
+import time
 from typing import List, Optional, Tuple
 
 from telegram import (
@@ -44,9 +45,13 @@ _manager = create_default_manager(config.YTDLP_COOKIES_FILE)
 #  工具函数
 # ──────────────────────────────────────────────
 
-def _is_authorized(user_id: int) -> bool:
+def _is_authorized(user_id: Optional[int], is_self_bot: bool = False) -> bool:
+    if is_self_bot:
+        return True
     if not config.ALLOWED_USERS:
         return True
+    if user_id is None:
+        return False
     return user_id in config.ALLOWED_USERS
 
 
@@ -91,13 +96,15 @@ async def _run_sync(func, *args):
 # ──────────────────────────────────────────────
 
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(config.MSG_WELCOME)
+    if update.effective_message:
+        await update.effective_message.reply_text(config.MSG_WELCOME)
 
 
 async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text(
-        config.MSG_HELP, parse_mode=ParseMode.MARKDOWN
-    )
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            config.MSG_HELP, parse_mode=ParseMode.MARKDOWN
+        )
 
 
 # ──────────────────────────────────────────────
@@ -106,15 +113,17 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理含 Twitter/X 链接的用户消息。"""
-    if not update.message or not update.message.text:
+    message = update.effective_message
+    if not message:
         return
 
     user = update.effective_user
-    if not _is_authorized(user.id):
-        await update.message.reply_text(config.MSG_NOT_AUTHORIZED)
+    is_self_bot = bool(user and user.is_bot and user.id == context.bot.id)
+    if not _is_authorized(user.id if user else None, is_self_bot=is_self_bot):
+        await message.reply_text(config.MSG_NOT_AUTHORIZED)
         return
 
-    text = update.message.text
+    text = message.text or message.caption or ""
     if not is_twitter_url(text):
         return
 
@@ -122,8 +131,13 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not tweet_url:
         return
 
-    logger.info(f"用户 {user.id} ({user.username}) 请求: {tweet_url}")
-    status_msg = await update.message.reply_text(config.MSG_PROCESSING)
+    user_label = (
+        f"{user.id} ({user.username})"
+        if user
+        else f"chat:{update.effective_chat.id if update.effective_chat else 'unknown'}"
+    )
+    logger.info(f"用户 {user_label} 请求: {tweet_url}")
+    status_msg = await message.reply_text(config.MSG_PROCESSING)
 
     try:
         await _process_tweet(update, context, tweet_url, status_msg)
@@ -163,7 +177,7 @@ async def _process_tweet(
     # 4. 处理 GIF（每个单独发送）
     for idx, gif_item in enumerate(gifs):
         gif_caption = caption if (not regulars and idx == 0) else ""
-        await _send_animation(update, context, gif_item, gif_caption)
+        await _send_animation(update, context, gif_item, gif_caption, status_msg)
 
     # 5. 删除状态消息
     await _safe_delete(status_msg)
@@ -179,7 +193,7 @@ async def _handle_regulars(
     """下载并发送普通媒体（1 个→单发，多个→媒体组）。"""
     if len(items) == 1:
         await _safe_edit(status_msg, config.MSG_DOWNLOADING)
-        await _send_single(update, context, items[0], caption)
+        await _send_single(update, context, items[0], caption, status_msg)
     else:
         await _send_group(update, context, items[:10], caption, status_msg)
 
@@ -198,21 +212,61 @@ async def _send_large_file(
     item: MediaItem,
     path: str,
     caption: str,
+    status_msg: Optional[Message] = None,
 ) -> bool:
     """Send a file through MTProto when Bot API upload would be too small."""
     uploader = _get_telegram_api_uploader(context)
     chat = update.effective_chat
+    message = update.effective_message
+    size_mb = _file_size_mb(path)
     if not uploader or not chat:
-        await update.message.reply_text(
-            f"{config.MSG_FILE_TOO_LARGE}\n"
-            "未启用 Telegram API 上传，请配置 TELEGRAM_API_ID 和 TELEGRAM_API_HASH。"
-        )
+        if message:
+            await message.reply_text(
+                f"{config.MSG_FILE_TOO_LARGE}\n"
+                "未启用 Telegram API 上传，请配置 TELEGRAM_API_ID 和 TELEGRAM_API_HASH。"
+            )
         return False
 
     can_upload, reason = uploader.can_upload(path)
     if not can_upload:
-        await update.message.reply_text(f"{config.MSG_FILE_TOO_LARGE}\n{reason}")
+        if message:
+            await message.reply_text(f"{config.MSG_FILE_TOO_LARGE}\n{reason}")
         return False
+
+    logger.info(
+        "检测到大文件，切换 Telegram API 上传: chat_id=%s size=%.2f MB type=%s",
+        chat.id,
+        size_mb,
+        item.media_type,
+    )
+    last_progress_at = 0.0
+    last_percent = -1
+
+    def progress_callback(current: int, total: int) -> None:
+        nonlocal last_progress_at, last_percent
+        if not total:
+            return
+        percent = int(current * 100 / total)
+        now = time.monotonic()
+        if percent < 100 and now - last_progress_at < config.TELEGRAM_API_PROGRESS_INTERVAL:
+            return
+        last_percent = percent
+        last_progress_at = now
+        logger.info(
+            "Telegram API 上传进度: chat_id=%s %s/%s (%s%%)",
+            chat.id,
+            current,
+            total,
+            percent,
+        )
+        if status_msg:
+            asyncio.create_task(
+                _safe_edit(
+                    status_msg,
+                    f"{config.MSG_UPLOADING}\n"
+                    f"Telegram API: {percent}% ({current / 1024 / 1024:.1f}/{total / 1024 / 1024:.1f} MB)",
+                )
+            )
 
     try:
         await uploader.send_file(
@@ -221,6 +275,7 @@ async def _send_large_file(
             caption=caption or None,
             force_document=False,
             supports_streaming=item.media_type == "video",
+            progress_callback=progress_callback,
         )
     except Exception as exc:
         raise RuntimeError(str(exc)) from exc
@@ -233,11 +288,12 @@ async def _send_downloaded_file(
     item: MediaItem,
     path: str,
     caption: str,
+    status_msg: Optional[Message] = None,
 ) -> None:
     """Upload an already downloaded media file via Bot API or MTProto."""
     size_mb = _file_size_mb(path)
     if size_mb > config.MAX_FILE_SIZE_MB:
-        await _send_large_file(update, context, item, path, caption)
+        await _send_large_file(update, context, item, path, caption, status_msg)
         return
 
     thumb_path: Optional[str] = None
@@ -252,8 +308,11 @@ async def _send_downloaded_file(
                 logger.debug("视频封面下载失败", exc_info=True)
 
         with open(path, "rb") as fh:
+            message = update.effective_message
+            if not message:
+                raise RuntimeError("当前 update 没有可回复的消息")
             if item.media_type == "video":
-                await update.message.reply_video(
+                await message.reply_video(
                     video=fh,
                     caption=caption or None,
                     thumbnail=thumb_fh,
@@ -266,14 +325,14 @@ async def _send_downloaded_file(
                     connect_timeout=30,
                 )
             elif item.media_type == "gif":
-                await update.message.reply_animation(
+                await message.reply_animation(
                     animation=fh,
                     caption=caption or None,
                     read_timeout=60,
                     write_timeout=300,
                 )
             else:
-                await update.message.reply_photo(
+                await message.reply_photo(
                     photo=fh,
                     caption=caption or None,
                     read_timeout=60,
@@ -294,27 +353,38 @@ async def _send_single(
     context: ContextTypes.DEFAULT_TYPE,
     item: MediaItem,
     caption: str,
+    status_msg: Optional[Message] = None,
 ) -> None:
     """下载单个媒体并上传。"""
     temp_path: Optional[str] = None
     try:
         temp_path, _ = await _run_sync(download_file, item.url)
         if not temp_path:
-            await update.message.reply_text(config.MSG_DOWNLOAD_FAILED)
+            if update.effective_message:
+                await update.effective_message.reply_text(config.MSG_DOWNLOAD_FAILED)
             return
 
-        await _send_downloaded_file(update, context, item, temp_path, caption)
+        await _send_downloaded_file(
+            update,
+            context,
+            item,
+            temp_path,
+            caption,
+            status_msg,
+        )
 
     except TelegramError as exc:
         logger.error(f"上传失败: {exc}")
-        await update.message.reply_text(
-            config.MSG_UPLOAD_ERROR.format(error=str(exc))
-        )
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                config.MSG_UPLOAD_ERROR.format(error=str(exc))
+            )
     except RuntimeError as exc:
         logger.error(f"Telegram API 上传失败: {exc}")
-        await update.message.reply_text(
-            config.MSG_UPLOAD_ERROR.format(error=str(exc))
-        )
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                config.MSG_UPLOAD_ERROR.format(error=str(exc))
+            )
     finally:
         cleanup_file(temp_path)
 
@@ -324,6 +394,7 @@ async def _send_animation(
     context: ContextTypes.DEFAULT_TYPE,
     item: MediaItem,
     caption: str,
+    status_msg: Optional[Message] = None,
 ) -> None:
     """下载 GIF 并以动图形式发送。"""
     temp_path: Optional[str] = None
@@ -332,7 +403,14 @@ async def _send_animation(
         if not temp_path:
             return
 
-        await _send_downloaded_file(update, context, item, temp_path, caption)
+        await _send_downloaded_file(
+            update,
+            context,
+            item,
+            temp_path,
+            caption,
+            status_msg,
+        )
     except TelegramError as exc:
         logger.error(f"GIF 上传失败: {exc}")
     except RuntimeError as exc:
@@ -385,6 +463,7 @@ async def _send_group(
                 downloaded[0][0],
                 downloaded[0][1],
                 caption,
+                status_msg,
             )
             return
 
@@ -401,6 +480,7 @@ async def _send_group(
                     item,
                     temp_path,
                     caption if i == 0 else "",
+                    status_msg,
                 )
             return
 
@@ -425,7 +505,11 @@ async def _send_group(
                     InputMediaPhoto(media=fh, caption=item_caption)
                 )
 
-        await update.message.reply_media_group(
+        message = update.effective_message
+        if not message:
+            raise RuntimeError("当前 update 没有可回复的消息")
+
+        await message.reply_media_group(
             media=media_group,
             read_timeout=120,
             write_timeout=300,
@@ -434,14 +518,16 @@ async def _send_group(
 
     except TelegramError as exc:
         logger.error(f"媒体组上传失败: {exc}")
-        await update.message.reply_text(
-            config.MSG_UPLOAD_ERROR.format(error=str(exc))
-        )
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                config.MSG_UPLOAD_ERROR.format(error=str(exc))
+            )
     except RuntimeError as exc:
         logger.error(f"Telegram API 媒体组上传失败: {exc}")
-        await update.message.reply_text(
-            config.MSG_UPLOAD_ERROR.format(error=str(exc))
-        )
+        if update.effective_message:
+            await update.effective_message.reply_text(
+                config.MSG_UPLOAD_ERROR.format(error=str(exc))
+            )
     finally:
         for fh in file_handles:
             try:

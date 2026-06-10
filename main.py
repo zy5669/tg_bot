@@ -40,6 +40,7 @@ def build_application() -> Application:
     builder = (
         Application.builder()
         .token(config.BOT_TOKEN)
+        .concurrent_updates(config.CONCURRENT_UPDATES)
         .post_init(post_init)
         .post_shutdown(post_shutdown)
     )
@@ -57,9 +58,9 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("help",  help_handler))
 
-    # 注册普通文本消息处理器（排除命令）
+    # 注册普通文本/媒体标题消息处理器（排除命令）
     app.add_handler(
-        MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler)
+        MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, message_handler)
     )
 
     return app
@@ -81,6 +82,7 @@ def main() -> None:
 
     if config.HTTP_PROXY or config.HTTPS_PROXY:
         logger.info(f"代理: {config.HTTP_PROXY or config.HTTPS_PROXY}")
+    logger.info(f"并发处理上限: {config.CONCURRENT_UPDATES}")
 
     logger.info("正在启动 Twitter 媒体下载机器人...")
     app = build_application()

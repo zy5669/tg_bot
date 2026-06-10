@@ -44,10 +44,23 @@ TEMP_DIR: str = str(BASE_DIR / "temp")
 # Telegram Bot API 上传限制（MB）
 MAX_FILE_SIZE_MB: float = 50.0
 
+# 同时处理的 Telegram update 数量。下载/上传都是重 IO，建议从 2-4 开始。
+CONCURRENT_UPDATES: int = int(os.getenv("CONCURRENT_UPDATES", "4"))
+
 # MTProto 上传保护上限（MB）。Telegram 当前支持更大的文件，但机器人部署端
 # 通常更需要一个可控的本地磁盘/带宽保护阈值。
 MAX_TELEGRAM_API_FILE_SIZE_MB: float = float(
     os.getenv("MAX_TELEGRAM_API_FILE_SIZE_MB", "2000")
+)
+
+# 大文件上传进度消息最小刷新间隔（秒），避免过于频繁 edit message。
+TELEGRAM_API_PROGRESS_INTERVAL: float = float(
+    os.getenv("TELEGRAM_API_PROGRESS_INTERVAL", "3")
+)
+
+# 同时进行的 Telegram API 大文件上传数量。
+TELEGRAM_API_CONCURRENT_UPLOADS: int = int(
+    os.getenv("TELEGRAM_API_CONCURRENT_UPLOADS", "2")
 )
 
 # 调试模式：显示更多日志

@@ -1,8 +1,9 @@
 """Telegram MTProto uploader for files larger than the Bot API limit."""
+import asyncio
 import logging
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import config
 
@@ -20,6 +21,9 @@ class TelegramApiUploader:
 
     def __init__(self) -> None:
         self._client = None
+        self._upload_semaphore = asyncio.Semaphore(
+            config.TELEGRAM_API_CONCURRENT_UPLOADS
+        )
         self.status = self._build_status()
 
     @staticmethod
@@ -45,13 +49,26 @@ class TelegramApiUploader:
 
         from telethon import TelegramClient
 
+        logger.info(
+            "正在启动 Telegram API 大文件上传: api_id=%s session=%s concurrent_uploads=%s",
+            config.TELEGRAM_API_ID,
+            config.TELEGRAM_SESSION_NAME,
+            config.TELEGRAM_API_CONCURRENT_UPLOADS,
+        )
         self._client = TelegramClient(
             config.TELEGRAM_SESSION_NAME,
             config.TELEGRAM_API_ID,
             config.TELEGRAM_API_HASH,
         )
         await self._client.start(bot_token=config.BOT_TOKEN)
-        logger.info("Telegram API 大文件上传已启用")
+        me = await self._client.get_me()
+        username = f"@{me.username}" if getattr(me, "username", None) else me.id
+        logger.info(
+            "Telegram API 大文件上传已启用: bot=%s id=%s。"
+            "使用 bot token 登录时不会出现手机号验证码。",
+            username,
+            me.id,
+        )
 
     async def stop(self) -> None:
         if self._client:
@@ -78,17 +95,33 @@ class TelegramApiUploader:
         caption: Optional[str] = None,
         force_document: bool = False,
         supports_streaming: bool = True,
+        progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> None:
         can_upload, reason = self.can_upload(path)
         if not can_upload:
             raise RuntimeError(reason)
 
-        await self._client.send_file(
+        size_mb = os.path.getsize(path) / (1024 * 1024)
+        logger.info(
+            "Telegram API 开始发送文件: chat_id=%s path=%s size=%.2f MB",
             chat_id,
             path,
-            caption=caption,
-            force_document=force_document,
-            supports_streaming=supports_streaming,
+            size_mb,
+        )
+        async with self._upload_semaphore:
+            await self._client.send_file(
+                chat_id,
+                path,
+                caption=caption,
+                force_document=force_document,
+                supports_streaming=supports_streaming,
+                progress_callback=progress_callback,
+            )
+        logger.info(
+            "Telegram API 文件发送完成: chat_id=%s path=%s size=%.2f MB",
+            chat_id,
+            path,
+            size_mb,
         )
 
 
