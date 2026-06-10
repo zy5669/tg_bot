@@ -288,6 +288,7 @@ async def _send_large_file(
     item: MediaItem,
     path: str,
     caption: str,
+    thumb_path: Optional[str] = None,
     status_msg: Optional[Message] = None,
 ) -> bool:
     """Send a file through MTProto when Bot API upload would be too small."""
@@ -347,6 +348,7 @@ async def _send_large_file(
             caption=caption or None,
             force_document=False,
             supports_streaming=item.media_type == "video",
+            thumb_path=thumb_path,
             progress_callback=progress_callback,
         )
     except Exception as exc:
@@ -363,11 +365,6 @@ async def _send_downloaded_file(
     status_msg: Optional[Message] = None,
 ) -> None:
     """Upload an already downloaded media file via Bot API or MTProto."""
-    size_mb = _file_size_mb(path)
-    if size_mb > config.MAX_FILE_SIZE_MB:
-        await _send_large_file(target, context, item, path, caption, status_msg)
-        return
-
     thumb_path: Optional[str] = None
     thumb_fh = None
     try:
@@ -378,6 +375,19 @@ async def _send_downloaded_file(
                     thumb_fh = open(thumb_path, "rb")
             except Exception:
                 logger.debug("视频封面下载失败", exc_info=True)
+
+        size_mb = _file_size_mb(path)
+        if size_mb > config.MAX_FILE_SIZE_MB:
+            await _send_large_file(
+                target,
+                context,
+                item,
+                path,
+                caption,
+                thumb_path,
+                status_msg,
+            )
+            return
 
         with open(path, "rb") as fh:
             if item.media_type == "video":

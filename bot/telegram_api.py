@@ -95,6 +95,7 @@ class TelegramApiUploader:
         caption: Optional[str] = None,
         force_document: bool = False,
         supports_streaming: bool = True,
+        thumb_path: Optional[str] = None,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> None:
         can_upload, reason = self.can_upload(path)
@@ -115,6 +116,7 @@ class TelegramApiUploader:
                 caption=caption,
                 force_document=force_document,
                 supports_streaming=supports_streaming,
+                thumb=thumb_path,
                 progress_callback=progress_callback,
             )
         logger.info(
