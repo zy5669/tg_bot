@@ -12,10 +12,24 @@ try:
 except ImportError:
     pass
 
+BASE_DIR = Path(__file__).parent
+
 # ==================== Telegram Bot 配置 ====================
 
 # Bot Token（从 @BotFather 获取）
 BOT_TOKEN: str = os.getenv("BOT_TOKEN", "YOUR_BOT_TOKEN_HERE")
+
+# Telegram API（my.telegram.org 获取），用于通过 MTProto 上传超过 Bot API
+# 50 MB 限制的文件。未配置时，大文件会给出明确提示。
+TELEGRAM_API_ID_RAW: str = os.getenv("TELEGRAM_API_ID", "").strip()
+TELEGRAM_API_ID: int | None = (
+    int(TELEGRAM_API_ID_RAW) if TELEGRAM_API_ID_RAW.isdigit() else None
+)
+TELEGRAM_API_HASH: str | None = os.getenv("TELEGRAM_API_HASH", "").strip() or None
+TELEGRAM_SESSION_NAME: str = os.getenv(
+    "TELEGRAM_SESSION_NAME",
+    str(BASE_DIR / "telegram_bot_api"),
+)
 
 # 允许使用的用户 ID 列表（空列表 = 允许所有用户）
 _allowed_raw = os.getenv("ALLOWED_USERS", "")
@@ -25,11 +39,16 @@ ALLOWED_USERS: list[int] = [
 
 # ==================== 下载配置 ====================
 
-BASE_DIR = Path(__file__).parent
 TEMP_DIR: str = str(BASE_DIR / "temp")
 
 # Telegram Bot API 上传限制（MB）
 MAX_FILE_SIZE_MB: float = 50.0
+
+# MTProto 上传保护上限（MB）。Telegram 当前支持更大的文件，但机器人部署端
+# 通常更需要一个可控的本地磁盘/带宽保护阈值。
+MAX_TELEGRAM_API_FILE_SIZE_MB: float = float(
+    os.getenv("MAX_TELEGRAM_API_FILE_SIZE_MB", "2000")
+)
 
 # 调试模式：显示更多日志
 DEBUG_MODE: bool = os.getenv("DEBUG", "false").lower() == "true"
@@ -79,7 +98,7 @@ MSG_DOWNLOADING_N  = "⏳ 正在下载 ({current}/{total})..."
 MSG_UPLOADING      = "⏳ 正在上传到 Telegram..."
 MSG_NO_MEDIA       = "❌ 未找到可下载的媒体内容。\n该推文可能不含媒体，或已被删除/设为私有。"
 MSG_DOWNLOAD_FAILED = "❌ 下载失败，请稍后重试。"
-MSG_FILE_TOO_LARGE = "⚠️ 文件过大（超过 50 MB），无法通过 Telegram Bot API 上传。"
+MSG_FILE_TOO_LARGE = "⚠️ 文件超过 Telegram Bot API 50 MB 限制。"
 MSG_NOT_AUTHORIZED = "⛔ 您没有使用此机器人的权限。"
 MSG_UPLOAD_ERROR   = "❌ 上传失败：{error}"
 

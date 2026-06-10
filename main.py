@@ -10,6 +10,17 @@ from telegram.ext import Application, CommandHandler, MessageHandler, filters
 
 import config
 from bot.handlers import start_handler, help_handler, message_handler
+from bot.telegram_api import create_telegram_api_uploader
+
+
+async def post_init(app: Application) -> None:
+    app.bot_data["telegram_api_uploader"] = await create_telegram_api_uploader()
+
+
+async def post_shutdown(app: Application) -> None:
+    uploader = app.bot_data.get("telegram_api_uploader")
+    if uploader:
+        await uploader.stop()
 
 
 def setup_logging() -> None:
@@ -26,7 +37,12 @@ def setup_logging() -> None:
 
 
 def build_application() -> Application:
-    builder = Application.builder().token(config.BOT_TOKEN)
+    builder = (
+        Application.builder()
+        .token(config.BOT_TOKEN)
+        .post_init(post_init)
+        .post_shutdown(post_shutdown)
+    )
 
     # 若配置了代理，为 Telegram 连接也启用代理
     proxy = config.HTTP_PROXY or config.HTTPS_PROXY
