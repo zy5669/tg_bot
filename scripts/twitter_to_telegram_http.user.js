@@ -19,6 +19,7 @@
     let SUBMIT_ENDPOINT = GM_getValue('tg_submit_endpoint', 'http://127.0.0.1:8787/submit');
     let TELEGRAM_CHAT_ID = GM_getValue('telegram_chat_id', '');
     let SUBMIT_SECRET = GM_getValue('tg_submit_secret', '');
+    const DEBUG = false;
 
     function checkConfig() {
         if (!SUBMIT_ENDPOINT || !TELEGRAM_CHAT_ID || !SUBMIT_SECRET) {
@@ -39,6 +40,10 @@
             GM_setValue('tg_submit_secret', SUBMIT_SECRET);
         }
         return true;
+    }
+
+    function hasConfig() {
+        return Boolean(SUBMIT_ENDPOINT && TELEGRAM_CHAT_ID && SUBMIT_SECRET);
     }
 
     function submitTweet(tweetUrl) {
@@ -130,6 +135,7 @@
             font-weight: 700;
             margin-left: 8px;
             padding: 0 9px;
+            line-height: 28px;
         `;
 
         button.addEventListener('click', function (event) {
@@ -150,16 +156,53 @@
     function addPushButtonToTweet(tweetElement) {
         if (tweetElement.querySelector('.telegram-http-push-button')) return;
 
-        const actionBar = tweetElement.querySelector('[role="group"]');
-        if (!actionBar) return;
-
         const pushButton = createPushButton(tweetElement);
         pushButton.classList.add('telegram-http-push-button');
-        actionBar.appendChild(pushButton);
+
+        const actionBar = findActionBar(tweetElement);
+        if (actionBar) {
+            actionBar.appendChild(pushButton);
+            return;
+        }
+
+        const container = tweetElement.querySelector('article') || tweetElement;
+        const currentPosition = getComputedStyle(container).position;
+        if (currentPosition === 'static') {
+            container.style.position = 'relative';
+        }
+        pushButton.style.cssText += `
+            position: absolute;
+            top: 8px;
+            right: 8px;
+            z-index: 20;
+            margin-left: 0;
+        `;
+        container.appendChild(pushButton);
+    }
+
+    function findActionBar(tweetElement) {
+        const groups = Array.from(tweetElement.querySelectorAll('[role="group"]'));
+        if (!groups.length) return null;
+
+        const tweetRect = tweetElement.getBoundingClientRect();
+        const candidates = groups
+            .map((group) => ({ group, rect: group.getBoundingClientRect() }))
+            .filter(({ rect }) => rect.width > 80 && rect.height > 16)
+            .sort((a, b) => {
+                const aBottomDistance = Math.abs(tweetRect.bottom - a.rect.bottom);
+                const bBottomDistance = Math.abs(tweetRect.bottom - b.rect.bottom);
+                return aBottomDistance - bBottomDistance;
+            });
+
+        return candidates[0]?.group || groups[groups.length - 1];
     }
 
     function processTweets() {
-        document.querySelectorAll('[data-testid="tweet"]').forEach(addPushButtonToTweet);
+        const tweets = document.querySelectorAll('[data-testid="tweet"], article[data-testid="tweet"]');
+        tweets.forEach(addPushButtonToTweet);
+        if (DEBUG) {
+            console.log(`Telegram HTTP 脚本扫描推文: ${tweets.length}`);
+        }
     }
 
     function observeDOMChanges() {
@@ -182,8 +225,11 @@
     }
 
     function addSettingsButton() {
+        if (document.querySelector('.telegram-http-settings-button')) return;
+
         const settingsButton = document.createElement('button');
         settingsButton.textContent = 'TG 设置';
+        settingsButton.classList.add('telegram-http-settings-button');
         settingsButton.style.cssText = `
             position: fixed;
             bottom: 20px;
@@ -223,9 +269,14 @@
             return;
         }
 
+        if (!hasConfig()) {
+            setTimeout(checkConfig, 500);
+        }
+
+        addSettingsButton();
         setTimeout(processTweets, 1000);
+        setInterval(processTweets, 3000);
         observeDOMChanges();
-        setTimeout(addSettingsButton, 2000);
         console.log('Twitter/X 到 Telegram HTTP 提交脚本已启动');
     }
 
