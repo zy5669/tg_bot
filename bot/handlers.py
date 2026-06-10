@@ -91,6 +91,61 @@ async def _run_sync(func, *args):
     return await loop.run_in_executor(None, func, *args)
 
 
+class ReplyTarget:
+    """A destination that can be either an incoming message or a raw chat_id."""
+
+    def __init__(
+        self,
+        context: ContextTypes.DEFAULT_TYPE,
+        chat_id: int,
+        message: Optional[Message] = None,
+    ) -> None:
+        self.context = context
+        self.chat_id = chat_id
+        self.message = message
+
+    @classmethod
+    def from_update(
+        cls,
+        context: ContextTypes.DEFAULT_TYPE,
+        update: Update,
+    ) -> Optional["ReplyTarget"]:
+        message = update.effective_message
+        chat = update.effective_chat
+        if not chat:
+            return None
+        return cls(context=context, chat_id=chat.id, message=message)
+
+    async def reply_text(self, text: str, **kwargs) -> Message:
+        if self.message:
+            return await self.message.reply_text(text, **kwargs)
+        return await self.context.bot.send_message(
+            chat_id=self.chat_id,
+            text=text,
+            **kwargs,
+        )
+
+    async def reply_video(self, **kwargs) -> Message:
+        if self.message:
+            return await self.message.reply_video(**kwargs)
+        return await self.context.bot.send_video(chat_id=self.chat_id, **kwargs)
+
+    async def reply_animation(self, **kwargs) -> Message:
+        if self.message:
+            return await self.message.reply_animation(**kwargs)
+        return await self.context.bot.send_animation(chat_id=self.chat_id, **kwargs)
+
+    async def reply_photo(self, **kwargs) -> Message:
+        if self.message:
+            return await self.message.reply_photo(**kwargs)
+        return await self.context.bot.send_photo(chat_id=self.chat_id, **kwargs)
+
+    async def reply_media_group(self, **kwargs) -> Tuple[Message, ...]:
+        if self.message:
+            return await self.message.reply_media_group(**kwargs)
+        return await self.context.bot.send_media_group(chat_id=self.chat_id, **kwargs)
+
+
 # ──────────────────────────────────────────────
 #  命令处理器
 # ──────────────────────────────────────────────
@@ -113,17 +168,17 @@ async def help_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """处理含 Twitter/X 链接的用户消息。"""
-    message = update.effective_message
-    if not message:
+    target = ReplyTarget.from_update(context, update)
+    if not target or not target.message:
         return
 
     user = update.effective_user
     is_self_bot = bool(user and user.is_bot and user.id == context.bot.id)
     if not _is_authorized(user.id if user else None, is_self_bot=is_self_bot):
-        await message.reply_text(config.MSG_NOT_AUTHORIZED)
+        await target.reply_text(config.MSG_NOT_AUTHORIZED)
         return
 
-    text = message.text or message.caption or ""
+    text = target.message.text or target.message.caption or ""
     if not is_twitter_url(text):
         return
 
@@ -137,12 +192,33 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         else f"chat:{update.effective_chat.id if update.effective_chat else 'unknown'}"
     )
     logger.info(f"用户 {user_label} 请求: {tweet_url}")
-    status_msg = await message.reply_text(config.MSG_PROCESSING)
+    status_msg = await target.reply_text(config.MSG_PROCESSING)
 
     try:
-        await _process_tweet(update, context, tweet_url, status_msg)
+        await _process_tweet(target, context, tweet_url, status_msg)
     except Exception as exc:
         logger.error(f"处理推文时发生未预期的错误: {exc}", exc_info=True)
+        await _safe_edit(status_msg, config.MSG_DOWNLOAD_FAILED)
+
+
+async def submit_tweet_url(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    tweet_url: str,
+) -> None:
+    """Process a tweet URL submitted outside Telegram updates."""
+    target = ReplyTarget(context=context, chat_id=chat_id)
+    status_msg = await target.reply_text(config.MSG_PROCESSING)
+    try:
+        await _process_tweet(target, context, tweet_url, status_msg)
+    except Exception as exc:
+        logger.error(
+            "外部提交处理失败: chat_id=%s url=%s error=%s",
+            chat_id,
+            tweet_url,
+            exc,
+            exc_info=True,
+        )
         await _safe_edit(status_msg, config.MSG_DOWNLOAD_FAILED)
 
 
@@ -151,7 +227,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 # ──────────────────────────────────────────────
 
 async def _process_tweet(
-    update: Update,
+    target: ReplyTarget,
     context: ContextTypes.DEFAULT_TYPE,
     tweet_url: str,
     status_msg: Message,
@@ -172,19 +248,19 @@ async def _process_tweet(
 
     # 3. 处理普通媒体（图片 + 视频）
     if regulars:
-        await _handle_regulars(update, context, regulars, caption, status_msg)
+        await _handle_regulars(target, context, regulars, caption, status_msg)
 
     # 4. 处理 GIF（每个单独发送）
     for idx, gif_item in enumerate(gifs):
         gif_caption = caption if (not regulars and idx == 0) else ""
-        await _send_animation(update, context, gif_item, gif_caption, status_msg)
+        await _send_animation(target, context, gif_item, gif_caption, status_msg)
 
     # 5. 删除状态消息
     await _safe_delete(status_msg)
 
 
 async def _handle_regulars(
-    update: Update,
+    target: ReplyTarget,
     context: ContextTypes.DEFAULT_TYPE,
     items: List[MediaItem],
     caption: str,
@@ -193,9 +269,9 @@ async def _handle_regulars(
     """下载并发送普通媒体（1 个→单发，多个→媒体组）。"""
     if len(items) == 1:
         await _safe_edit(status_msg, config.MSG_DOWNLOADING)
-        await _send_single(update, context, items[0], caption, status_msg)
+        await _send_single(target, context, items[0], caption, status_msg)
     else:
-        await _send_group(update, context, items[:10], caption, status_msg)
+        await _send_group(target, context, items[:10], caption, status_msg)
 
 
 def _get_telegram_api_uploader(context: ContextTypes.DEFAULT_TYPE):
@@ -207,7 +283,7 @@ def _file_size_mb(path: str) -> float:
 
 
 async def _send_large_file(
-    update: Update,
+    target: ReplyTarget,
     context: ContextTypes.DEFAULT_TYPE,
     item: MediaItem,
     path: str,
@@ -216,26 +292,22 @@ async def _send_large_file(
 ) -> bool:
     """Send a file through MTProto when Bot API upload would be too small."""
     uploader = _get_telegram_api_uploader(context)
-    chat = update.effective_chat
-    message = update.effective_message
     size_mb = _file_size_mb(path)
-    if not uploader or not chat:
-        if message:
-            await message.reply_text(
-                f"{config.MSG_FILE_TOO_LARGE}\n"
-                "未启用 Telegram API 上传，请配置 TELEGRAM_API_ID 和 TELEGRAM_API_HASH。"
-            )
+    if not uploader:
+        await target.reply_text(
+            f"{config.MSG_FILE_TOO_LARGE}\n"
+            "未启用 Telegram API 上传，请配置 TELEGRAM_API_ID 和 TELEGRAM_API_HASH。"
+        )
         return False
 
     can_upload, reason = uploader.can_upload(path)
     if not can_upload:
-        if message:
-            await message.reply_text(f"{config.MSG_FILE_TOO_LARGE}\n{reason}")
+        await target.reply_text(f"{config.MSG_FILE_TOO_LARGE}\n{reason}")
         return False
 
     logger.info(
         "检测到大文件，切换 Telegram API 上传: chat_id=%s size=%.2f MB type=%s",
-        chat.id,
+        target.chat_id,
         size_mb,
         item.media_type,
     )
@@ -254,7 +326,7 @@ async def _send_large_file(
         last_progress_at = now
         logger.info(
             "Telegram API 上传进度: chat_id=%s %s/%s (%s%%)",
-            chat.id,
+            target.chat_id,
             current,
             total,
             percent,
@@ -270,7 +342,7 @@ async def _send_large_file(
 
     try:
         await uploader.send_file(
-            chat.id,
+            target.chat_id,
             path,
             caption=caption or None,
             force_document=False,
@@ -283,7 +355,7 @@ async def _send_large_file(
 
 
 async def _send_downloaded_file(
-    update: Update,
+    target: ReplyTarget,
     context: ContextTypes.DEFAULT_TYPE,
     item: MediaItem,
     path: str,
@@ -293,7 +365,7 @@ async def _send_downloaded_file(
     """Upload an already downloaded media file via Bot API or MTProto."""
     size_mb = _file_size_mb(path)
     if size_mb > config.MAX_FILE_SIZE_MB:
-        await _send_large_file(update, context, item, path, caption, status_msg)
+        await _send_large_file(target, context, item, path, caption, status_msg)
         return
 
     thumb_path: Optional[str] = None
@@ -308,11 +380,8 @@ async def _send_downloaded_file(
                 logger.debug("视频封面下载失败", exc_info=True)
 
         with open(path, "rb") as fh:
-            message = update.effective_message
-            if not message:
-                raise RuntimeError("当前 update 没有可回复的消息")
             if item.media_type == "video":
-                await message.reply_video(
+                await target.reply_video(
                     video=fh,
                     caption=caption or None,
                     thumbnail=thumb_fh,
@@ -325,14 +394,14 @@ async def _send_downloaded_file(
                     connect_timeout=30,
                 )
             elif item.media_type == "gif":
-                await message.reply_animation(
+                await target.reply_animation(
                     animation=fh,
                     caption=caption or None,
                     read_timeout=60,
                     write_timeout=300,
                 )
             else:
-                await message.reply_photo(
+                await target.reply_photo(
                     photo=fh,
                     caption=caption or None,
                     read_timeout=60,
@@ -349,7 +418,7 @@ async def _send_downloaded_file(
 # ──────────────────────────────────────────────
 
 async def _send_single(
-    update: Update,
+    target: ReplyTarget,
     context: ContextTypes.DEFAULT_TYPE,
     item: MediaItem,
     caption: str,
@@ -360,12 +429,11 @@ async def _send_single(
     try:
         temp_path, _ = await _run_sync(download_file, item.url)
         if not temp_path:
-            if update.effective_message:
-                await update.effective_message.reply_text(config.MSG_DOWNLOAD_FAILED)
+            await target.reply_text(config.MSG_DOWNLOAD_FAILED)
             return
 
         await _send_downloaded_file(
-            update,
+            target,
             context,
             item,
             temp_path,
@@ -375,22 +443,16 @@ async def _send_single(
 
     except TelegramError as exc:
         logger.error(f"上传失败: {exc}")
-        if update.effective_message:
-            await update.effective_message.reply_text(
-                config.MSG_UPLOAD_ERROR.format(error=str(exc))
-            )
+        await target.reply_text(config.MSG_UPLOAD_ERROR.format(error=str(exc)))
     except RuntimeError as exc:
         logger.error(f"Telegram API 上传失败: {exc}")
-        if update.effective_message:
-            await update.effective_message.reply_text(
-                config.MSG_UPLOAD_ERROR.format(error=str(exc))
-            )
+        await target.reply_text(config.MSG_UPLOAD_ERROR.format(error=str(exc)))
     finally:
         cleanup_file(temp_path)
 
 
 async def _send_animation(
-    update: Update,
+    target: ReplyTarget,
     context: ContextTypes.DEFAULT_TYPE,
     item: MediaItem,
     caption: str,
@@ -404,7 +466,7 @@ async def _send_animation(
             return
 
         await _send_downloaded_file(
-            update,
+            target,
             context,
             item,
             temp_path,
@@ -424,7 +486,7 @@ async def _send_animation(
 # ──────────────────────────────────────────────
 
 async def _send_group(
-    update: Update,
+    target: ReplyTarget,
     context: ContextTypes.DEFAULT_TYPE,
     items: List[MediaItem],
     caption: str,
@@ -458,7 +520,7 @@ async def _send_group(
         if len(downloaded) == 1:
             await _safe_edit(status_msg, config.MSG_UPLOADING)
             await _send_downloaded_file(
-                update,
+                target,
                 context,
                 downloaded[0][0],
                 downloaded[0][1],
@@ -475,7 +537,7 @@ async def _send_group(
             await _safe_edit(status_msg, config.MSG_UPLOADING)
             for i, (item, temp_path) in enumerate(downloaded):
                 await _send_downloaded_file(
-                    update,
+                    target,
                     context,
                     item,
                     temp_path,
@@ -505,11 +567,7 @@ async def _send_group(
                     InputMediaPhoto(media=fh, caption=item_caption)
                 )
 
-        message = update.effective_message
-        if not message:
-            raise RuntimeError("当前 update 没有可回复的消息")
-
-        await message.reply_media_group(
+        await target.reply_media_group(
             media=media_group,
             read_timeout=120,
             write_timeout=300,
@@ -518,16 +576,10 @@ async def _send_group(
 
     except TelegramError as exc:
         logger.error(f"媒体组上传失败: {exc}")
-        if update.effective_message:
-            await update.effective_message.reply_text(
-                config.MSG_UPLOAD_ERROR.format(error=str(exc))
-            )
+        await target.reply_text(config.MSG_UPLOAD_ERROR.format(error=str(exc)))
     except RuntimeError as exc:
         logger.error(f"Telegram API 媒体组上传失败: {exc}")
-        if update.effective_message:
-            await update.effective_message.reply_text(
-                config.MSG_UPLOAD_ERROR.format(error=str(exc))
-            )
+        await target.reply_text(config.MSG_UPLOAD_ERROR.format(error=str(exc)))
     finally:
         for fh in file_handles:
             try:

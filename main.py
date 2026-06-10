@@ -58,10 +58,8 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", start_handler))
     app.add_handler(CommandHandler("help",  help_handler))
 
-    # 注册普通文本/媒体标题消息处理器（排除命令）
-    app.add_handler(
-        MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, message_handler)
-    )
+    # 注册全部消息处理器，具体是否包含 Twitter/X 链接由 handler 内部判断。
+    app.add_handler(MessageHandler(filters.ALL, message_handler))
 
     return app
 
