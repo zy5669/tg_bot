@@ -112,6 +112,9 @@ class TelegramApiUploader:
         force_document: bool = False,
         supports_streaming: bool = True,
         thumb_path: Optional[str] = None,
+        duration: Optional[int] = None,
+        width: Optional[int] = None,
+        height: Optional[int] = None,
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> None:
         can_upload, reason = self.can_upload(path)
@@ -135,6 +138,9 @@ class TelegramApiUploader:
                     force_document=force_document,
                     supports_streaming=supports_streaming,
                     thumb_path=thumb_path,
+                    duration=duration,
+                    width=width,
+                    height=height,
                     progress_callback=progress_callback,
                 )
             except ConnectionError as exc:
@@ -147,6 +153,9 @@ class TelegramApiUploader:
                     force_document=force_document,
                     supports_streaming=supports_streaming,
                     thumb_path=thumb_path,
+                    duration=duration,
+                    width=width,
+                    height=height,
                     progress_callback=progress_callback,
                 )
         logger.info(
@@ -165,8 +174,24 @@ class TelegramApiUploader:
         force_document: bool,
         supports_streaming: bool,
         thumb_path: Optional[str],
+        duration: Optional[int],
+        width: Optional[int],
+        height: Optional[int],
         progress_callback: Optional[Callable[[int, int], None]],
     ) -> None:
+        attributes = None
+        if supports_streaming:
+            from telethon.tl.types import DocumentAttributeVideo
+
+            attributes = [
+                DocumentAttributeVideo(
+                    duration=duration or 0,
+                    w=width or 0,
+                    h=height or 0,
+                    supports_streaming=True,
+                )
+            ]
+
         await self._client.send_file(
             chat_id,
             path,
@@ -174,6 +199,7 @@ class TelegramApiUploader:
             force_document=force_document,
             supports_streaming=supports_streaming,
             thumb=thumb_path,
+            attributes=attributes,
             progress_callback=progress_callback,
         )
 

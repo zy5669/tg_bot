@@ -307,10 +307,13 @@ async def _send_large_file(
         return False
 
     logger.info(
-        "检测到大文件，切换 Telegram API 上传: chat_id=%s size=%.2f MB type=%s",
+        "检测到大文件，切换 Telegram API 上传: chat_id=%s size=%.2f MB type=%s duration=%s width=%s height=%s",
         target.chat_id,
         size_mb,
         item.media_type,
+        item.duration,
+        item.width,
+        item.height,
     )
     last_progress_at = 0.0
     last_percent = -1
@@ -349,6 +352,9 @@ async def _send_large_file(
             force_document=False,
             supports_streaming=item.media_type == "video",
             thumb_path=thumb_path,
+            duration=item.duration,
+            width=item.width,
+            height=item.height,
             progress_callback=progress_callback,
         )
     except Exception as exc:
