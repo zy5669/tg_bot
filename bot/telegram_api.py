@@ -21,6 +21,7 @@ class TelegramApiUploader:
 
     def __init__(self) -> None:
         self._client = None
+        self._connect_lock = asyncio.Lock()
         self._upload_semaphore = asyncio.Semaphore(
             config.TELEGRAM_API_CONCURRENT_UPLOADS
         )
@@ -47,28 +48,43 @@ class TelegramApiUploader:
             logger.info("Telegram API 大文件上传未启用: %s", self.status.reason)
             return
 
-        from telethon import TelegramClient
+        await self._ensure_connected()
 
-        logger.info(
-            "正在启动 Telegram API 大文件上传: api_id=%s session=%s concurrent_uploads=%s",
-            config.TELEGRAM_API_ID,
-            config.TELEGRAM_SESSION_NAME,
-            config.TELEGRAM_API_CONCURRENT_UPLOADS,
-        )
-        self._client = TelegramClient(
-            config.TELEGRAM_SESSION_NAME,
-            config.TELEGRAM_API_ID,
-            config.TELEGRAM_API_HASH,
-        )
-        await self._client.start(bot_token=config.BOT_TOKEN)
-        me = await self._client.get_me()
-        username = f"@{me.username}" if getattr(me, "username", None) else me.id
-        logger.info(
-            "Telegram API 大文件上传已启用: bot=%s id=%s。"
-            "使用 bot token 登录时不会出现手机号验证码。",
-            username,
-            me.id,
-        )
+    async def _ensure_connected(self) -> None:
+        """Create or reconnect the Telethon client before sending requests."""
+        if not self.status.enabled:
+            raise RuntimeError(self.status.reason or "Telegram API 未启用")
+
+        async with self._connect_lock:
+            if self._client and self._client.is_connected():
+                return
+
+            from telethon import TelegramClient
+
+            if self._client is None:
+                logger.info(
+                    "正在启动 Telegram API 大文件上传: api_id=%s session=%s concurrent_uploads=%s",
+                    config.TELEGRAM_API_ID,
+                    config.TELEGRAM_SESSION_NAME,
+                    config.TELEGRAM_API_CONCURRENT_UPLOADS,
+                )
+                self._client = TelegramClient(
+                    config.TELEGRAM_SESSION_NAME,
+                    config.TELEGRAM_API_ID,
+                    config.TELEGRAM_API_HASH,
+                )
+            else:
+                logger.warning("Telegram API 客户端已断开，正在重连")
+
+            await self._client.start(bot_token=config.BOT_TOKEN)
+            me = await self._client.get_me()
+            username = f"@{me.username}" if getattr(me, "username", None) else me.id
+            logger.info(
+                "Telegram API 大文件上传已连接: bot=%s id=%s。"
+                "使用 bot token 登录时不会出现手机号验证码。",
+                username,
+                me.id,
+            )
 
     async def stop(self) -> None:
         if self._client:
@@ -76,8 +92,8 @@ class TelegramApiUploader:
             self._client = None
 
     def can_upload(self, path: str) -> tuple[bool, str]:
-        if not self.status.enabled or not self._client:
-            return False, self.status.reason or "Telegram API 客户端未启动"
+        if not self.status.enabled:
+            return False, self.status.reason or "Telegram API 未启用"
 
         size_mb = os.path.getsize(path) / (1024 * 1024)
         if size_mb > config.MAX_TELEGRAM_API_FILE_SIZE_MB:
@@ -110,20 +126,55 @@ class TelegramApiUploader:
             size_mb,
         )
         async with self._upload_semaphore:
-            await self._client.send_file(
-                chat_id,
-                path,
-                caption=caption,
-                force_document=force_document,
-                supports_streaming=supports_streaming,
-                thumb=thumb_path,
-                progress_callback=progress_callback,
-            )
+            await self._ensure_connected()
+            try:
+                await self._send_file_once(
+                    chat_id,
+                    path,
+                    caption=caption,
+                    force_document=force_document,
+                    supports_streaming=supports_streaming,
+                    thumb_path=thumb_path,
+                    progress_callback=progress_callback,
+                )
+            except ConnectionError as exc:
+                logger.warning("Telegram API 上传时连接断开，重连后重试一次: %s", exc)
+                await self._ensure_connected()
+                await self._send_file_once(
+                    chat_id,
+                    path,
+                    caption=caption,
+                    force_document=force_document,
+                    supports_streaming=supports_streaming,
+                    thumb_path=thumb_path,
+                    progress_callback=progress_callback,
+                )
         logger.info(
             "Telegram API 文件发送完成: chat_id=%s path=%s size=%.2f MB",
             chat_id,
             path,
             size_mb,
+        )
+
+    async def _send_file_once(
+        self,
+        chat_id: int,
+        path: str,
+        *,
+        caption: Optional[str],
+        force_document: bool,
+        supports_streaming: bool,
+        thumb_path: Optional[str],
+        progress_callback: Optional[Callable[[int, int], None]],
+    ) -> None:
+        await self._client.send_file(
+            chat_id,
+            path,
+            caption=caption,
+            force_document=force_document,
+            supports_streaming=supports_streaming,
+            thumb=thumb_path,
+            progress_callback=progress_callback,
         )
 
 
